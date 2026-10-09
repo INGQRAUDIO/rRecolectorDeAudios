@@ -14,18 +14,18 @@ TABLE_NAME = "AudioLinks"
 CATEGORIA_OPCIONES = ["Informativos", "Culturales", "Musicales", "Otro"]
 CATEGORIA_PLACEHOLDER = "Selecciona una categoría"
 
-TIME_PATTERN = re.compile(r"^\d{1,2}:\d{2}$")  # formato m:ss o mm:ss
+
+#Formato de tiempo
+TIME_PATTERN = re.compile(r"^\d{1,2}:\d{2}$")
 
 
 def tiempo_a_segundos(tiempo: str) -> int:
-    """Convierte 'm:ss' o 'mm:ss' a segundos totales (int), para columnas int4."""
     minutos, segundos = tiempo.strip().split(":")
     return int(minutos) * 60 + int(segundos)
 
 
 @st.cache_resource
 def get_supabase_client():
-    """Crea el cliente de Supabase usando credenciales en st.secrets."""
     url = st.secrets.get("SUPABASE_URL", "")
     key = st.secrets.get("SUPABASE_KEY", "")
     if not url or not key:
@@ -35,9 +35,6 @@ def get_supabase_client():
 
 supabase: Client | None = get_supabase_client()
 
-# --------------------------------------------------------------------------
-# ESTILOS (tema oscuro + acento morado, inspirado en el mockup)
-# --------------------------------------------------------------------------
 st.markdown(
     """
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -176,16 +173,14 @@ st.title("Recolector (Audios)")
 
 if supabase is None:
     st.warning(
-        "No se encontraron credenciales de Supabase. Configura `SUPABASE_URL` y "
-        "`SUPABASE_KEY` en `.streamlit/secrets.toml` para poder enviar datos.",
-        icon="⚠️",
+        "No se encontraron credenciales de Supabase"
     )
 
 # --------------------------------------------------------------------------
 # ESTADO
 # --------------------------------------------------------------------------
 if "entries" not in st.session_state:
-    st.session_state.entries = []  # lista de dicts pendientes de enviar
+    st.session_state.entries = []
 if "edit_index" not in st.session_state:
     st.session_state.edit_index = None
 for key, default in [
@@ -262,7 +257,7 @@ def enviar_a_supabase():
         return
     if not st.session_state.entries:
         return
-    ahora = datetime.now().isoformat(timespec="seconds")  # fecha y hora exacta del envío
+    ahora = datetime.now().isoformat(timespec="seconds")
     try:
         registros = [
             {
@@ -281,7 +276,7 @@ def enviar_a_supabase():
 
 
 # --------------------------------------------------------------------------
-# PANEL 1: FORMULARIO DE INGRESO
+# FORMULARIO 
 # --------------------------------------------------------------------------
 with st.container(border=True, key="panel_form"):
     st.markdown("### Ingresa los datos:" if st.session_state.edit_index is None else "### Editando registro:")
@@ -301,7 +296,7 @@ with st.container(border=True, key="panel_form"):
 
     campos_ok = campos_completos()
     if campos_ok and not formatos_validos():
-        st.caption("⚠️ IN y OUT deben tener formato m:ss (ej. 1:23)")
+        st.caption("IN y OUT deben tener formato valido de tiempo (ej. 1:23)")
         campos_ok = False
 
     label_boton = "Guardar cambios" if st.session_state.edit_index is not None else "Agregar a la lista"
@@ -315,7 +310,7 @@ with st.container(border=True, key="panel_form"):
             st.button("Cancelar edición", on_click=limpiar_formulario, use_container_width=True)
 
 # --------------------------------------------------------------------------
-# PANEL 2: LISTA DE AUDIOS PENDIENTES
+# AUDIOS PENDIENTES
 # --------------------------------------------------------------------------
 with st.container(border=True, key="panel_list"):
     st.markdown("### Lista de audios")
