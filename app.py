@@ -1,7 +1,12 @@
+import hmac
+import html
+import logging
 import re
 from datetime import datetime
+from urllib.parse import urlparse
 
 import streamlit as st
+from postgrest.types import ReturnMethod
 from supabase import Client, create_client
 
 # --------------------------------------------------------------------------
@@ -16,7 +21,15 @@ CATEGORIA_PLACEHOLDER = "Selecciona una categoría"
 
 
 #Formato de tiempo
-TIME_PATTERN = re.compile(r"^\d{1,2}:\d{2}$")
+TIME_PATTERN = re.compile(r"^\d{1,2}:[0-5]\d$")  # segundos 00-59
+
+# Limites para evitar abusos / datos basura
+MAX_URL = 500
+MAX_TITULO = 150
+MAX_ENTRADAS = 50
+MAX_INTENTOS_LOGIN = 5
+
+logger = logging.getLogger(__name__)
 
 
 def tiempo_a_segundos(tiempo: str) -> int:
@@ -45,6 +58,21 @@ st.markdown(
 
     html, body, [class*="css"], .stApp, .stApp * {
         font-family: 'Oswald', sans-serif !important;
+    }
+    .stApp [data-testid="stIconMaterial"],
+    .stApp .material-icons {
+        font-family: 'Material Symbols Rounded', 'Material Symbols Outlined', 'Material Icons' !important;
+        font-feature-settings: 'liga' !important;
+    }
+    .st-key-pwd_input button [data-testid="stIconMaterial"] {
+        font-size: 0 !important;
+    }
+    .st-key-pwd_input button [data-testid="stIconMaterial"]::before {
+        content: "visibility_off";
+        font-size: 1.25rem;
+    }
+    .st-key-pwd_input:has(input[type="text"]) button [data-testid="stIconMaterial"]::before {
+        content: "visibility";
     }
     .stApp {
         background-color: #121014;
@@ -171,6 +199,32 @@ st.markdown(
 
 st.title("Recolector (Audios)")
 
+
+def verificar_acceso() -> bool:
+    """Puerta de acceso con contraseña definida en st.secrets['APP_PASSWORD']."""
+    clave = st.secrets.get("APP_PASSWORD", "")
+    if not clave:
+        st.warning("La app no tiene contraseña de acceso configurada (APP_PASSWORD).")
+        return True
+    if st.session_state.get("autenticado"):
+        return True
+    if st.session_state.get("intentos_login", 0) >= MAX_INTENTOS_LOGIN:
+        st.error("Demasiados intentos. Recarga la página e inténtalo más tarde.")
+        return False
+    intento = st.text_input("Contraseña de acceso:", type="password", key="pwd_input")
+    if intento:
+        if hmac.compare_digest(intento.encode(), clave.encode()):
+            st.session_state.autenticado = True
+            st.rerun()
+        else:
+            st.session_state.intentos_login = st.session_state.get("intentos_login", 0) + 1
+            st.error("Contraseña incorrecta.")
+    return False
+
+
+if not verificar_acceso():
+    st.stop()
+
 if supabase is None:
     st.warning(
         "No se encontraron credenciales de Supabase"
@@ -211,6 +265,18 @@ def formatos_validos() -> bool:
     )
 
 
+def url_valida() -> bool:
+    p = urlparse(st.session_state.url_input.strip())
+    return p.scheme in ("http", "https") and bool(p.netloc)
+
+
+def rango_valido() -> bool:
+    try:
+        return tiempo_a_segundos(st.session_state.in_input) < tiempo_a_segundos(st.session_state.out_input)
+    except ValueError:
+        return False
+
+
 def limpiar_formulario():
     st.session_state.url_input = ""
     st.session_state.titulo_input = ""
@@ -221,6 +287,11 @@ def limpiar_formulario():
 
 
 def agregar_o_actualizar_entrada():
+    # Revalidacion en servidor (no depender solo del boton deshabilitado)
+    if not (campos_completos() and formatos_validos() and url_valida() and rango_valido()):
+        return
+    if st.session_state.edit_index is None and len(st.session_state.entries) >= MAX_ENTRADAS:
+        return
     entry = {
         "url": st.session_state.url_input.strip(),
         "titulo": st.session_state.titulo_input.strip(),
@@ -268,11 +339,14 @@ def enviar_a_supabase():
             }
             for entry in st.session_state.entries
         ]
-        supabase.table(TABLE_NAME).insert(registros).execute()
+        supabase.table(TABLE_NAME).insert(registros, returning=ReturnMethod.minimal).execute()
         st.session_state.enviado_ok = len(st.session_state.entries)
         st.session_state.entries = []
     except Exception as exc:  # noqa: BLE001
-        st.session_state.enviado_error = str(exc)
+        logger.exception("Error al insertar en Supabase: %s", exc)
+        st.session_state.enviado_error = (
+            "No se pudo completar el envío. Inténtalo de nuevo o contacta al administrador."
+        )
 
 
 # --------------------------------------------------------------------------
@@ -281,8 +355,8 @@ def enviar_a_supabase():
 with st.container(border=True, key="panel_form"):
     st.markdown("### Ingresa los datos:" if st.session_state.edit_index is None else "### Editando registro:")
 
-    st.text_input("URL:", key="url_input")
-    st.text_input("TITULO:", key="titulo_input")
+    st.text_input("URL:", key="url_input", max_chars=MAX_URL)
+    st.text_input("TITULO:", key="titulo_input", max_chars=MAX_TITULO)
     c1, c2 = st.columns(2)
     with c1:
         st.text_input("IN:", key="in_input", placeholder="0:00")
@@ -297,6 +371,19 @@ with st.container(border=True, key="panel_form"):
     campos_ok = campos_completos()
     if campos_ok and not formatos_validos():
         st.caption("IN y OUT deben tener formato valido de tiempo (ej. 1:23)")
+        campos_ok = False
+    elif campos_ok and not url_valida():
+        st.caption("La URL debe iniciar con http:// o https://")
+        campos_ok = False
+    elif campos_ok and not rango_valido():
+        st.caption("IN debe ser menor que OUT")
+        campos_ok = False
+    if (
+        campos_ok
+        and st.session_state.edit_index is None
+        and len(st.session_state.entries) >= MAX_ENTRADAS
+    ):
+        st.caption(f"Máximo {MAX_ENTRADAS} registros por envío. Envía la lista actual primero.")
         campos_ok = False
 
     label_boton = "Guardar cambios" if st.session_state.edit_index is not None else "Agregar a la lista"
@@ -323,7 +410,7 @@ with st.container(border=True, key="panel_list"):
             with row_col:
                 st.markdown(
                     f'<div class="entry-row">'
-                    f'{i + 1}. {entry["titulo"]}  IN:{entry["in"]}  OUT:{entry["out"]}'
+                    f'{i + 1}. {html.escape(entry["titulo"])}  IN:{html.escape(entry["in"])}  OUT:{html.escape(entry["out"])}'
                     f"</div>",
                     unsafe_allow_html=True,
                 )
@@ -351,5 +438,5 @@ if st.session_state.get("enviado_ok"):
     st.success(f"Se enviaron {st.session_state.enviado_ok} registro(s) correctamente.")
     del st.session_state["enviado_ok"]
 if st.session_state.get("enviado_error"):
-    st.error(f"Error al enviar a Supabase: {st.session_state.enviado_error}")
+    st.error(st.session_state.enviado_error)
     del st.session_state["enviado_error"]
